@@ -5,25 +5,63 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 
 	"cpa-key-billing/internal/billing"
 )
 
-func TestPriceAdmissionAndDeleteWithoutInventory(t *testing.T) {
-	app := newConfiguredApp(t)
-	intercept := func(format, model string) RequestInterceptResponse {
-		t.Helper()
-		raw, err := app.HandleMethod(MethodRequestInterceptBefore, mustMarshal(t, RequestInterceptRequest{SourceFormat: format, Model: model, RequestedModel: model}))
-		if err != nil {
-			t.Fatal(err)
-		}
-		var result RequestInterceptResponse
-		decodeResult(t, raw, &result)
-		return result
+func interceptPriced(t *testing.T, app *App, format, model string) RequestInterceptResponse {
+	t.Helper()
+	raw, err := app.HandleMethod(MethodRequestInterceptBefore, mustMarshal(t, RequestInterceptRequest{SourceFormat: format, Model: model, RequestedModel: model}))
+	if err != nil {
+		t.Fatal(err)
 	}
+	var result RequestInterceptResponse
+	decodeResult(t, raw, &result)
+	return result
+}
+
+func newConfiguredAppWithYAML(t *testing.T, extra string) *App {
+	t.Helper()
+	app := newTestApp(t)
+	t.Cleanup(app.Shutdown)
+	raw, errHandle := app.HandleMethod(MethodPluginRegister, mustMarshal(t, LifecycleRequest{
+		ConfigYAML: append(testConfigYAML(t, true), []byte(extra)...),
+	}))
+	if errHandle != nil {
+		t.Fatalf("plugin.register error = %v", errHandle)
+	}
+	decodeResult(t, raw, nil)
+	return app
+}
+
+func TestUnpricedModelsAllowedByDefault(t *testing.T) {
+	app := newConfiguredApp(t)
 	for _, format := range []string{"openai", "openai-response", "claude", "gemini"} {
-		result := intercept(format, "unpriced-dummy")
+		if result := interceptPriced(t, app, format, "unpriced-dummy"); result.Terminate {
+			t.Fatal(format, "unpriced model must be admitted by default", result)
+		}
+	}
+	page, err := app.store.PluginLogsPage(billing.PluginLogQuery{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reports := 0
+	for _, entry := range page.Entries {
+		if strings.Contains(entry.Message, "Model unpriced-dummy has no configured price") {
+			reports++
+		}
+	}
+	if reports != 1 {
+		t.Fatalf("unpriced model must be reported exactly once per interval, got %d", reports)
+	}
+}
+
+func TestPriceAdmissionAndDeleteWithoutInventory(t *testing.T) {
+	app := newConfiguredAppWithYAML(t, "unpriced_models: block\n")
+	for _, format := range []string{"openai", "openai-response", "claude", "gemini"} {
+		result := interceptPriced(t, app, format, "unpriced-dummy")
 		var payload struct {
 			Error struct{ Type, Code, Message string }
 		}
@@ -36,7 +74,7 @@ func TestPriceAdmissionAndDeleteWithoutInventory(t *testing.T) {
 	}
 	for _, model := range []string{"unpriced-dummy", "gpt-4o"} {
 		callOK(t, app, http.MethodPut, routePrices, nil, billing.CustomPrice{ModelID: model}, 200, nil)
-		if result := intercept("openai", model); result.Terminate {
+		if result := interceptPriced(t, app, "openai", model); result.Terminate {
 			t.Fatal("configured price rejected", result)
 		}
 		price, _, err := app.store.ResolveModelPrice(model, model, false)
@@ -44,7 +82,7 @@ func TestPriceAdmissionAndDeleteWithoutInventory(t *testing.T) {
 			t.Fatal(price, err)
 		}
 		callOK(t, app, http.MethodDelete, routePrices, url.Values{"model_id": {model}}, nil, 200, nil)
-		if result := intercept("openai", model); result.Terminate != (model == "unpriced-dummy") {
+		if result := interceptPriced(t, app, "openai", model); result.Terminate != (model == "unpriced-dummy") {
 			t.Fatal("delete did not fall back to reference/missing", result)
 		}
 	}

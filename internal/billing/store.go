@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,6 +39,11 @@ type Store struct {
 
 	errMu     sync.Mutex
 	lastError string
+
+	// unpricedLogged rate-limits the plugin log for models admitted without a
+	// price, so a busy unpriced model is reported once per interval.
+	unpricedMu     sync.Mutex
+	unpricedLogged map[string]time.Time
 
 	open                    func(string) (Repository, error)
 	downloadReferencePrices func(context.Context) ([]byte, error)
@@ -163,6 +169,41 @@ func (s *Store) MaskAPIKeyViewEmails() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.cfg.MaskAPIKeyViewEmails
+}
+
+// BlockUnpricedModels reports whether requests for models without any price
+// must be refused instead of billed at zero cost.
+func (s *Store) BlockUnpricedModels() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfg.UnpricedModels == UnpricedModelsBlock
+}
+
+// unpricedLogInterval bounds how often one unpriced model is reported.
+const unpricedLogInterval = 24 * time.Hour
+
+// NoteUnpricedModel reports a model that was admitted without a price. The
+// log is written at most once per model per unpricedLogInterval.
+func (s *Store) NoteUnpricedModel(model string) {
+	key := NormalizeModelID(model)
+	if key == "" {
+		return
+	}
+	now := s.Now()
+	s.unpricedMu.Lock()
+	if s.unpricedLogged == nil {
+		s.unpricedLogged = make(map[string]time.Time)
+	}
+	last, seen := s.unpricedLogged[key]
+	if seen && now.Sub(last) < unpricedLogInterval {
+		s.unpricedMu.Unlock()
+		return
+	}
+	s.unpricedLogged[key] = now
+	s.unpricedMu.Unlock()
+	s.AddPluginLog(PluginLogInfo,
+		"Model %s has no configured price; admitting it at zero cost (unpriced_models=allow). Token and request quotas still apply; add a custom price to bill it.",
+		strings.TrimSpace(model))
 }
 
 func (s *Store) AllowAPIKeyQuotaReset() bool {
