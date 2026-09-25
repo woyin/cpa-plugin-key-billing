@@ -86,6 +86,9 @@ plugins:
       mask_api_key_view_emails: false # 对 API Key 查询页面返回的邮箱进行掩码脱敏
       allow_api_key_quota_reset: false # 允许 API Key 用户重置可访问的 Codex 和 Claude 认证文件额度，消耗上游重置次数
       state_file: "plugins/cpa-key-billing-state-v1.db"
+      unpriced_models: allow # 模型没有任何价格时：allow 按 0 元放行（Token/请求额度仍生效，插件日志每天提示一次），block 拒绝
+      reference_price_refresh_hours: 24 # models.dev 参考价超过该小时数后，在处理用量时自动刷新；0 表示关闭
+      sync_custom_prices_from_reference: true # models.dev 价格变化时，同步更新与旧参考价完全一致的自定义价
 ```
 
 > [!WARNING]
@@ -116,7 +119,9 @@ http(s)://<CLIProxyAPI 地址>/v0/resource/plugins/cpa-key-billing/ui#account
 - 订阅计划可设置多个自定义额度窗口，每个窗口可单独或组合限制金额、Token、请求数。
 - 每个 API Key 独立记账。独立周期从首次放行开始；统一周期可为各窗口指定下次开始时间，所有绑定 Key 按固定时间重置。
 - 手动重置额度时，统一周期的重置时间保持不变；独立周期在下一次放行时重新开始。
-- 自定义价优先于 models.dev 参考价，两者都没有时拒绝新请求。
+- 自定义价优先于 models.dev 参考价。两者都没有时，默认（`unpriced_models: allow`）按 0 元放行并计入 Token、请求额度，金额额度不会增加；设为 `block` 则拒绝新请求。
+- models.dev 参考价会在超过 `reference_price_refresh_hours` 后自动刷新。刷新在 CLIProxyAPI 投递用量时同步完成，不会延迟客户端请求，插件也不启动后台任务。
+- 从参考价复制的自定义价（数值与参考价完全一致）会随 models.dev 更新；手动修改过的自定义价不会被覆盖。
 - 请求事件保留最近 365 天。
 
 ## 路由规则
@@ -154,7 +159,7 @@ flowchart TB
 | 模型无权访问 | `403` | `permission_error` | `insufficient_quota` |
 | 没有符合规则且可用的凭证 | `503` | `server_error` | `internal_server_error` |
 | 已绑定的路由规则不存在或损坏 | `503` | `server_error` | `routing_configuration_error` |
-| 模型未定价 | `503` | `cpa_key_billing_error` | `model_price_error` |
+| 模型未定价（仅 `unpriced_models: block`） | `503` | `cpa_key_billing_error` | `model_price_error` |
 
 ## 致谢
 

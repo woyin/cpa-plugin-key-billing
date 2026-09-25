@@ -21,6 +21,9 @@ plugins:
       enabled: true
       debug: true
       state_file: "__RUNTIME_DIR__/state.db"
+      # The headless admission check needs the refusal; the suite switches to
+      # the default "allow" at the end and verifies zero-cost admission.
+      unpriced_models: block
 
 # Keep the prefixed and bare model routes on distinct upstreams.
 force-model-prefix: true
