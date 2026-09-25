@@ -89,7 +89,12 @@ func (a *App) interceptBeforeAuth(raw []byte) ([]byte, error) {
 		return OKEnvelope(priceRefusal(req.SourceFormat, "price_storage_error", "Failed to load model pricing. Please try again later."))
 	}
 	if price.Source == billing.PriceSourceNone {
-		return OKEnvelope(priceRefusal(req.SourceFormat, "model_price_error", fmt.Sprintf("Model %s has no configured price", model)))
+		if a.store.BlockUnpricedModels() {
+			return OKEnvelope(priceRefusal(req.SourceFormat, "model_price_error", fmt.Sprintf("Model %s has no configured price", model)))
+		}
+		// Admitted at zero cost: usage.handle records the event with price
+		// source "none", and token/request quotas still apply.
+		a.store.NoteUnpricedModel(model)
 	}
 	if helper {
 		// Nested plugin helpers do not consume another client admission slot, but
