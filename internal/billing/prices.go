@@ -157,8 +157,8 @@ func (s *Store) ResolveModelPrice(upstream, requested string, refresh bool) (Pri
 	ctx, cancel := context.WithTimeout(context.Background(), referencePriceOperationTimeout)
 	defer cancel()
 	match, err := references.lookup(ctx, upstream, requested)
-	if err == nil && refresh && referencePricesNeedRefresh(match.metadata, match.found, s.Now()) {
-		_, refreshErr := references.refresh(ctx, s.Now, false, match.refreshSequence, match.found)
+	if err == nil && refresh && referencePricesNeedRefresh(match.metadata, match.found, s.Now(), s.referencePriceMaxAge()) {
+		_, refreshErr := s.refreshReferences(ctx, references, false, match.refreshSequence, match.found)
 		if refreshErr == nil {
 			match, err = references.lookup(ctx, upstream, requested)
 		}
