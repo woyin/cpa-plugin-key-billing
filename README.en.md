@@ -92,6 +92,9 @@ plugins:
       mask_api_key_view_emails: false # Mask email addresses in API key account views
       allow_api_key_quota_reset: false # Allow API key users to reset accessible Codex auth file quotas using upstream reset credits
       state_file: "plugins/cpa-key-billing-state-v1.db"
+      unpriced_models: allow # Models without any price: allow bills them at $0 (token/request quotas still apply, reported once a day in plugin logs); block rejects them
+      reference_price_refresh_hours: 24 # Refresh models.dev reference prices during usage handling once they are older than this; 0 disables it
+      sync_custom_prices_from_reference: true # When models.dev changes, update custom prices that exactly match the previous reference price
 ```
 
 > [!WARNING]
@@ -122,7 +125,9 @@ http(s)://<CLIProxyAPI address>/v0/resource/plugins/cpa-key-billing/ui#account
 - A plan can contain multiple quota windows. Each window can limit spending in USD, tokens, requests, or any combination of the three.
 - Usage is tracked separately for each key, even when keys share a plan. Independent cycles start when the first request is admitted. Shared cycles use the configured schedule for every bound key.
 - A manual quota reset keeps shared reset times unchanged. Independent cycles restart when the next request is admitted.
-- Custom model prices take precedence over models.dev reference prices. Requests are rejected if neither is available.
+- Custom model prices take precedence over models.dev reference prices. If neither is available, the default `unpriced_models: allow` admits the request at $0: token and request quotas still apply, amount quotas do not grow. Set `block` to reject such requests.
+- models.dev reference prices refresh automatically once they are older than `reference_price_refresh_hours`. The refresh runs synchronously while CLIProxyAPI delivers usage, so it never delays a client request and the plugin starts no background work.
+- Custom prices copied from a reference price (identical rates) follow models.dev updates; hand-edited custom prices are never overwritten.
 - Request events are retained for 365 days.
 
 ## Routing rules
@@ -164,7 +169,7 @@ flowchart TB
 | Model access denied | `403` | `permission_error` | `insufficient_quota` |
 | No available credential matches the routing rules | `503` | `server_error` | `internal_server_error` |
 | A bound routing rule is missing or invalid | `503` | `server_error` | `routing_configuration_error` |
-| Model has no price | `503` | `cpa_key_billing_error` | `model_price_error` |
+| Model has no price (only with `unpriced_models: block`) | `503` | `cpa_key_billing_error` | `model_price_error` |
 
 ## Acknowledgments
 

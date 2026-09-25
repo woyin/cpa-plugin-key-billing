@@ -1101,7 +1101,7 @@ assert_headless_price_admission() {
       return 1
     fi
   done
-  log_step "未访问前端：4 种协议均拒绝未定价模型"
+  log_step "未访问前端：unpriced_models=block 时 4 种协议均拒绝未定价模型"
 }
 
 assert_reference_price_billing() {
@@ -1148,6 +1148,48 @@ assert_reference_price_billing() {
     done
   done
   log_step "参考价已验证：普通模型及带前缀、思考后缀的模型，流式和非流式均按参考价记账"
+}
+
+assert_unpriced_allow() {
+  local port="$1" runtime_dir="$2" model="e2e-chat-to-chat-nonstream" attempt=0 http_status="" count
+  local events_file="$runtime_dir/unpriced-allow-events.json"
+  local logs_file="$runtime_dir/unpriced-allow-logs.json"
+  local response_file="$runtime_dir/responses/unpriced-allow.json"
+  management_call DELETE "$port" "/v0/management/plugins/cpa-key-billing/prices?model_id=$model" >/dev/null
+  management_call GET "$port" "/v0/management/plugins/cpa-key-billing/events?limit=100" >"$events_file"
+  count="$(jq -er '.entries | length' "$events_file")"
+  management_call PATCH "$port" "/v0/management/plugins/cpa-key-billing/config" \
+    -H "Content-Type: application/json" --data '{"unpriced_models":"allow"}' >/dev/null
+  # The host reloads the saved configuration asynchronously.
+  while (( attempt < 50 )); do
+    http_status="$(curl -sS --max-time 30 -H "Content-Type: application/json" -H "Authorization: Bearer e2e-downstream-key" \
+      --data "$(request_body chat "$model" false "Reply with exactly OK.")" \
+      --output "$response_file" --write-out '%{http_code}' "http://127.0.0.1:$port/v1/chat/completions")"
+    if [[ "$http_status" == "200" ]]; then
+      break
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.2
+  done
+  if [[ "$http_status" != "200" ]]; then
+    echo "unpriced_models=allow 未放行未定价模型，HTTP ${http_status}：$(cat "$response_file")" >&2
+    return 1
+  fi
+  wait_for_event_count "$port" "$((count + 1))" "$events_file"
+  if ! jq -e --arg model "$model" '
+    .entries[0] | .billing_model == $model and .price_source == "none" and .failed == false and .cost.total_usd == 0
+  ' "$events_file" >/dev/null; then
+    echo "未定价模型的请求事件不正确：$(jq -c '.entries[0]' "$events_file")" >&2
+    return 1
+  fi
+  management_call GET "$port" "/v0/management/plugins/cpa-key-billing/plugin-logs" >"$logs_file"
+  if ! jq -e --arg model "$model" '
+    [.entries[] | select(.message | contains("Model " + $model + " has no configured price; admitting it at zero cost"))] | length == 1
+  ' "$logs_file" >/dev/null; then
+    echo "插件日志缺少未定价模型提示。" >&2
+    return 1
+  fi
+  log_step "unpriced_models=allow：未定价模型按 0 元放行、记录事件并提示一次"
 }
 
 run_target() {
@@ -1501,6 +1543,7 @@ run_target() {
   fi
   log_step "插件启动事件已验证"
   assert_reference_price_billing "$port" "$runtime_dir"
+  assert_unpriced_allow "$port" "$runtime_dir"
 
   kill "$active_pid" >/dev/null 2>&1 || true
   wait "$active_pid" >/dev/null 2>&1 || true
