@@ -218,6 +218,9 @@ func (a *App) handleUsage(raw []byte) ([]byte, error) {
 		a.store.RecordUsage(event)
 	}
 	a.observeCredentialUsage(record.AuthIndex, record.AuthType, record.Source, scope)
+	// Usage arrives from the host's queue after the response, so a due
+	// models.dev refresh here never delays a client request.
+	a.store.MaybeRefreshReferencePrices()
 	return OKEnvelope(struct{}{})
 }
 

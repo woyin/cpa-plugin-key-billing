@@ -215,17 +215,19 @@ func (references *referencePriceManager) lookup(ctx context.Context, upstream, m
 	}, nil
 }
 
-func referencePricesNeedRefresh(metadata ReferencePriceMetadata, found bool, now time.Time) bool {
+// referencePricesNeedRefresh reports whether reference prices older than
+// maxAge (or older than an hour while a model is missing) should be fetched.
+func referencePricesNeedRefresh(metadata ReferencePriceMetadata, found bool, now time.Time, maxAge time.Duration) bool {
 	if !metadata.Usable || metadata.FetchedAt.IsZero() {
 		return true
 	}
 	age := now.Sub(metadata.FetchedAt)
-	return age > 24*time.Hour || (!found && age > time.Hour)
+	return age > maxAge || (!found && age > time.Hour)
 }
 
 // refresh executes in the caller, or joins the current caller's operation. An
 // observed refreshSequence prevents waiters from issuing a second download after it.
-func (references *referencePriceManager) refresh(ctx context.Context, now func() time.Time, force bool, observed uint64, found bool) (ReferencePriceMetadata, error) {
+func (references *referencePriceManager) refresh(ctx context.Context, now func() time.Time, force bool, observed uint64, found bool, maxAge time.Duration) (ReferencePriceMetadata, error) {
 	if references == nil {
 		return ReferencePriceMetadata{}, fmt.Errorf("The reference price database is not ready")
 	}
@@ -247,7 +249,7 @@ func (references *referencePriceManager) refresh(ctx context.Context, now func()
 		references.mu.Unlock()
 		return metadata, err
 	}
-	if !force && (!referencePricesNeedRefresh(references.metadata, found, now()) || now().Before(references.metadata.RetryAfter)) {
+	if !force && (!referencePricesNeedRefresh(references.metadata, found, now(), maxAge) || now().Before(references.metadata.RetryAfter)) {
 		metadata := references.metadata
 		references.mu.Unlock()
 		return metadata, nil
@@ -355,7 +357,7 @@ func (s *Store) EnsureReferencePrices() (ReferencePriceMetadata, error) {
 	defer cancel()
 	references := s.referencePrices.Load()
 	_, refreshSequence := references.status()
-	return references.refresh(ctx, s.Now, false, refreshSequence, true)
+	return s.refreshReferences(ctx, references, false, refreshSequence, true)
 }
 
 type ReferencePriceRefreshResult struct {
@@ -368,7 +370,7 @@ func (s *Store) RefreshReferencePrices() (ReferencePriceRefreshResult, error) {
 	defer cancel()
 	references := s.referencePrices.Load()
 	before, refreshSequence := references.status()
-	metadata, err := references.refresh(ctx, s.Now, true, refreshSequence, true)
+	metadata, err := s.refreshReferences(ctx, references, true, refreshSequence, true)
 	return ReferencePriceRefreshResult{Metadata: metadata, Changed: before.Version != metadata.Version}, err
 }
 
